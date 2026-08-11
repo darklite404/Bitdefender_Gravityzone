@@ -54,7 +54,7 @@ Tests only core services through the Ethernet adapter.
 Tests endpoint-to-Relay connectivity on ports 7074, 7076, and 7079.
 
 .NOTES
-Version: 2.0.0
+Version: 2.0.1
 Author: Pichet Jarunithi
 Data source: https://www.bitdefender.com/business/support/en/77209-1603896-gravityzone-cloud-instance-3.html
 Source publication date: 2026-08-11
@@ -103,6 +103,38 @@ function New-Endpoint {
         Scope    = $Scope
         Purpose  = $Purpose
     }
+}
+
+function Get-AdapterDisplayName {
+    param ([Parameter(Mandatory = $true)]$Adapter)
+
+    $interfaceAliasProperty = $Adapter.PSObject.Properties["InterfaceAlias"]
+    if ($null -ne $interfaceAliasProperty -and
+        -not [string]::IsNullOrWhiteSpace([string]$interfaceAliasProperty.Value)) {
+        return [string]$interfaceAliasProperty.Value
+    }
+
+    $netAdapterProperty = $Adapter.PSObject.Properties["NetAdapter"]
+    if ($null -ne $netAdapterProperty -and $null -ne $netAdapterProperty.Value) {
+        $netAdapterNameProperty = $netAdapterProperty.Value.PSObject.Properties["Name"]
+        if ($null -ne $netAdapterNameProperty -and
+            -not [string]::IsNullOrWhiteSpace([string]$netAdapterNameProperty.Value)) {
+            return [string]$netAdapterNameProperty.Value
+        }
+    }
+
+    $descriptionProperty = $Adapter.PSObject.Properties["InterfaceDescription"]
+    if ($null -ne $descriptionProperty -and
+        -not [string]::IsNullOrWhiteSpace([string]$descriptionProperty.Value)) {
+        return [string]$descriptionProperty.Value
+    }
+
+    $indexProperty = $Adapter.PSObject.Properties["InterfaceIndex"]
+    if ($null -ne $indexProperty -and $null -ne $indexProperty.Value) {
+        return "InterfaceIndex $($indexProperty.Value)"
+    }
+
+    return "Unknown IPv4 adapter"
 }
 
 function Resolve-TargetIPv4 {
@@ -443,7 +475,7 @@ $directEndpoints = @(
 
 $scriptExitCode = 2
 $transcriptStarted = $false
-$timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+$timestamp = (Get-Date).ToString("yyyyMMdd-HHmmss", [System.Globalization.CultureInfo]::InvariantCulture)
 
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
     $OutputDirectory = if ([string]::IsNullOrWhiteSpace($PSScriptRoot)) { (Get-Location).Path } else { $PSScriptRoot }
@@ -484,9 +516,11 @@ try {
         $_.NetAdapter.Status -eq "Up"
     })
 
-    if (@($AdapterAlias).Count -gt 0) {
-        $selectedAdapters = @($activeAdapters | Where-Object { $_.InterfaceAlias -in $AdapterAlias })
-        $missingAdapters = @($AdapterAlias | Where-Object { $_ -notin $selectedAdapters.InterfaceAlias })
+    $requestedAdapterAliases = @($AdapterAlias | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($requestedAdapterAliases.Count -gt 0) {
+        $selectedAdapters = @($activeAdapters | Where-Object { (Get-AdapterDisplayName -Adapter $_) -in $requestedAdapterAliases })
+        $selectedAdapterNames = @($selectedAdapters | ForEach-Object { Get-AdapterDisplayName -Adapter $_ })
+        $missingAdapters = @($requestedAdapterAliases | Where-Object { $_ -notin $selectedAdapterNames })
         if ($missingAdapters.Count -gt 0) {
             throw "Active IPv4 adapter(s) not found: $($missingAdapters -join ', ')"
         }
@@ -517,6 +551,7 @@ try {
 
     $results = New-Object System.Collections.Generic.List[object]
     foreach ($adapter in $selectedAdapters) {
+        $adapterName = Get-AdapterDisplayName -Adapter $adapter
         $sourceAddresses = @($adapter.IPv4Address | ForEach-Object { $_.IPAddress } | Where-Object {
             -not [string]::IsNullOrWhiteSpace($_) -and
             -not $_.StartsWith("169.254.") -and
@@ -524,7 +559,7 @@ try {
         } | Sort-Object -Unique)
 
         if ($sourceAddresses.Count -eq 0) {
-            Write-Warning "Skipping $($adapter.InterfaceAlias): no usable IPv4 source address."
+            Write-Warning "Skipping ${adapterName}: no usable IPv4 source address."
             continue
         }
 
@@ -536,7 +571,7 @@ try {
         }
         $gateway = if ($null -eq $adapter.IPv4DefaultGateway) { "None" } else { $adapter.IPv4DefaultGateway.NextHop }
 
-        Write-Host "Adapter: $($adapter.InterfaceAlias)" -ForegroundColor Cyan
+        Write-Host "Adapter: $adapterName" -ForegroundColor Cyan
         Write-Host "  Source IP(s): $($sourceAddresses -join ', ')"
         Write-Host "  Gateway:      $gateway"
         Write-Host "  DNS server(s): $(if ($dnsServers.Count -eq 0) { 'System default' } else { $dnsServers -join ', ' })"
@@ -545,7 +580,7 @@ try {
             foreach ($endpoint in $endpoints) {
                 $result = Test-DocumentedEndpoint `
                     -Endpoint $endpoint `
-                    -AdapterName $adapter.InterfaceAlias `
+                    -AdapterName $adapterName `
                     -SourceAddress $sourceAddress `
                     -DnsServers $dnsServers `
                     -Timeout $TimeoutSeconds `
